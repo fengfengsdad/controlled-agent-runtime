@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+data/*.db
+data/vector_store/
+dist/
+build/
+.DS_Store
+*.log
+
+# Personal planning notes, not project documentation
+docs/TWO_WEEK_PLAN.md
