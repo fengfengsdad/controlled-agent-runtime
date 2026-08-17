@@ -1,8 +1,8 @@
 # Controlled Agent Runtime
 
-Engineering-change delivery agent runtime（两周版 MVP）。
+Engineering-change delivery agent runtime.
 
-把合成工程变更需求转为结构化交付计划，覆盖：
+把合成的工程变更需求转为结构化交付计划，覆盖：
 
 - LangGraph 编排（retrieve → tool → plan → approval）
 - **混合检索**：BM25 稀疏召回 + 向量稠密召回 → RRF 融合，支持结构化预过滤（source / doc_type / classification / owner）
@@ -20,7 +20,8 @@ Engineering-change delivery agent runtime（两周版 MVP）。
 - 可选：Docker / OpenAI-compatible API Key
 
 ```bash
-cd /Users/yiyi/Projects/LearningAI/controlled-agent-runtime
+git clone https://github.com/fengfengsdad/controlled-agent-runtime.git
+cd controlled-agent-runtime
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -45,7 +46,7 @@ curl -s http://127.0.0.1:8080/v1/workflows \
   }' | python -m json.tool
 ```
 
-### MCP stdio tool（简历对齐）
+### MCP stdio tool
 
 默认 `TOOL_TRANSPORT=mcp`：Runtime 会拉起独立 MCP server 子进程，经 stdin/stdout 完成：
 
@@ -123,10 +124,6 @@ PROMPT_VERSION=v1
 ```
 
 兼容任何 OpenAI-compatible 网关（含部分国内代理）。
-
-## 两周计划
-
-见 [docs/TWO_WEEK_PLAN.md](docs/TWO_WEEK_PLAN.md)。
 
 ## 架构与运维
 
