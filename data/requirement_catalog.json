@@ -1,0 +1,20 @@
+{
+  "CHG-1001": {
+    "title": "Add idempotent webhook retries",
+    "owner": "payments-platform",
+    "status": "draft",
+    "constraints": [
+      "No duplicate side effects",
+      "Emit audit event on write"
+    ]
+  },
+  "CHG-1002": {
+    "title": "Introduce approval gate for agent writes",
+    "owner": "ai-platform",
+    "status": "ready",
+    "constraints": [
+      "Human approval before mutating tools",
+      "Prompt-injection rejection enabled"
+    ]
+  }
+}
