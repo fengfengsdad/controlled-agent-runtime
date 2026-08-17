@@ -26,11 +26,16 @@ curl -s -X POST localhost:8080/v1/workflows/{id}/approval \
   -d '{"approved": true, "reviewer": "yiyi"}'
 ```
 
-## Inspect audit chain
+## Inspect audit chain and evidence
 
 ```bash
 curl -s localhost:8080/v1/workflows/{id}/audit | python -m json.tool
+curl -s localhost:8080/v1/workflows/{id}/evidence | python -m json.tool
 ```
+
+`/evidence` replays what was retrieved, what the token budget dropped, which
+`[Sn]` labels were assigned, and which chunk supports each claim — or why the
+run refused with `insufficient_evidence`.
 
 ## Restart recovery
 
@@ -44,6 +49,7 @@ After process restart, `GET /v1/workflows/{id}` returns the last persisted state
 | 400 prompt-injection | adversarial wording | rewrite requirement |
 | plan empty / 500 with openai provider | missing/invalid API key | check `.env` |
 | no citations | empty corpus / not indexed | add docs + `/v1/admin/reindex` |
+| `insufficient_evidence` | retrieval score or citation coverage below floor | inspect `/evidence`; lower floors only if the miss is a packing bug |
 | duplicate business effect feared | missing idempotency key | pass stable `idempotency_key` |
 
 ## Docker

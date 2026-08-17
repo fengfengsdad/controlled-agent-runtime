@@ -10,7 +10,7 @@ from agent_runtime.models.schemas import AuditEvent, AuditEventType
 
 
 class AuditStore:
-    """Persists a six-event structured audit chain per workflow."""
+    """Persists a structured audit chain per workflow."""
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path

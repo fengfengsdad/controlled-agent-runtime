@@ -75,6 +75,12 @@ def run_eval(
                 elif expect == "awaiting_approval":
                     ok = response.status == WorkflowStatus.AWAITING_APPROVAL
                     detail = response.status.value
+                elif expect == "insufficient_evidence":
+                    ok = response.status == WorkflowStatus.INSUFFICIENT_EVIDENCE
+                    detail = (
+                        f"{response.status.value}:"
+                        f"{response.plan.refusal_reason if response.plan else ''}"
+                    )
                 else:
                     detail = f"unknown expect={expect}"
         except Exception as exc:  # noqa: BLE001

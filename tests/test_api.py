@@ -105,7 +105,10 @@ def test_workflow_audit_records_retrieval_stages(client):
     created = client.post(
         "/v1/workflows",
         json={
-            "requirement": "Add idempotent retry handling for webhook failures.",
+            "requirement": (
+                "Add idempotent retry handling for webhook failures "
+                "using idempotency keys."
+            ),
             "change_id": "CHG-1001",
             "auto_approve": True,
         },
@@ -119,3 +122,23 @@ def test_workflow_audit_records_retrieval_stages(client):
     assert payload["selected"]
     assert payload["selected"][0]["retrievers"]
     assert payload["selected"][0]["rerank_rank"] == 1
+
+
+def test_evidence_endpoint_replays_context_and_support(client):
+    created = client.post(
+        "/v1/workflows",
+        json={
+            "requirement": (
+                "Add idempotent retry handling for webhook failures "
+                "using idempotency keys."
+            ),
+            "change_id": "CHG-1001",
+            "auto_approve": True,
+        },
+    ).json()
+    evidence = client.get(f"/v1/workflows/{created['workflow_id']}/evidence").json()
+    assert evidence["status"] == "completed"
+    assert evidence["context"]["selected"][0]["label"] == "S1"
+    assert evidence["support"]
+    assert evidence["groundedness"]["citation_coverage"] >= 0.5
+    assert evidence["refusal_reason"] is None

@@ -14,14 +14,16 @@ FastAPI (OpenAPI)
   │
   ▼
 RuntimeService (orchestration owner)
-  ├─ LangGraph: start → retrieve → tool → plan → approval_gate
-  ├─ HybridRetriever (filter → recall → fuse)  ← retrieval strategy interface
-  │    ├─ VectorStore (chunk/embed/cosine)     ← embedding provider interface
+  ├─ LangGraph: start → retrieve → tool → context → plan → groundedness → approval_gate
+  ├─ HybridRetriever (filter → recall → fuse → rerank → diversity)
+  │    ├─ VectorStore (chunk/embed/cosine)
   │    └─ Bm25Index (in-process sparse index)
+  ├─ Context assembler (token budget, [S1] labels, drop counts)
+  ├─ Groundedness check (inline citations, coverage, insufficient-evidence refusal)
   ├─ LLMClient (stub | openai_compatible)    ← model provider interface
   ├─ RequirementLookupTool via MCP stdio   ← real client/server JSON-RPC session
   ├─ CheckpointStore (SQLite)                ← restart recovery + idempotency
-  └─ AuditStore (SQLite, 6 event types)      ← evidence chain
+  └─ AuditStore (SQLite)                     ← evidence chain
 ```
 
 ## Retrieval pipeline
@@ -37,6 +39,9 @@ query
   → rerank (stub | llm | cross_encoder)
   → MMR selection with per-source cap
   → top_k citations carrying per-stage ranks and scores
+  → token-budgeted context assembly with [S1]…[Sn] labels
+  → generation constrained to those labels
+  → post-generation groundedness check (coverage, hallucinated-label drop, refuse if below floor)
 ```
 
 `RETRIEVAL_MODE` selects `hybrid` (default), `vector`, or `bm25`, and the rerank
@@ -76,6 +81,17 @@ Design notes:
 - **Diversity is enforced at selection time** via MMR plus a per-source cap, and
   the number of candidates the cap blocked is reported, so the recall/diversity
   trade-off is visible rather than silent.
+- **Context is packed against an explicit token budget.** Leftover evidence is
+  counted, not dropped silently, and the last included chunk is truncated on a
+  sentence boundary. Labels `[S1]`…`[Sn]` are assigned here so generation and
+  the later groundedness check share one mapping.
+- **Unsupported answers are refused.** If the best retrieval score is below
+  `RELEVANCE_FLOOR`, generation is skipped. After generation, hallucinated
+  `[Sn]` labels are stripped and `citation_coverage` below `COVERAGE_FLOOR`
+  returns `insufficient_evidence` rather than a guessed plan.
+- `GET /v1/workflows/{id}/evidence` replays retrieval, packing, and per-claim
+  support so a "why this answer" question is reconstructable from the audit
+  trail.
 - **Known gap:** the tokenizer has no subword matching, so `idempotency` does not
   lexically match `webhook_idempotency_ledger`. Dense recall covers this, which
   is part of why hybrid is the default. Asserted in `tests/test_retrieval.py`.
@@ -106,8 +122,15 @@ This keeps tool execution outside the API process boundary while remaining synth
    with the mode, corpus size, count filtered out, per-retriever candidate
    counts, and the selected chunks with their per-retriever ranks.
 4. Invoke read-only requirement tool; emit `tool_invoked`.
-5. Generate plan JSON; emit `plan_generated`.
-6. Gate writes via approval; emit `approval_resolved` + `workflow_completed`.
+5. Assemble labelled context under the token budget; emit `context_assembled`
+   with tokens used, dropped counts, and `[Sn]` labels. If max retrieval score
+   is below the relevance floor, emit `groundedness_checked` + `workflow_completed`
+   with status `insufficient_evidence` and skip generation.
+6. Generate plan JSON constrained to those labels; emit `plan_generated`.
+7. Verify inline citations, drop hallucinated labels, compute coverage; emit
+   `groundedness_checked`. Coverage below the floor completes as
+   `insufficient_evidence` rather than an unsupported plan.
+8. Gate writes via approval; emit `approval_resolved` + `workflow_completed`.
 
 ## Trust boundaries
 

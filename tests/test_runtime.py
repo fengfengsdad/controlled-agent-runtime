@@ -16,7 +16,10 @@ def test_workflow_completes_with_auto_approve():
     runtime = RuntimeService()
     response = runtime.start_workflow(
         WorkflowRequest(
-            requirement="Add idempotent retries for webhook delivery failures.",
+            requirement=(
+                "Add idempotent retries for webhook delivery failures "
+                "using idempotency keys."
+            ),
             change_id="CHG-1001",
             auto_approve=True,
         )
@@ -25,7 +28,22 @@ def test_workflow_completes_with_auto_approve():
     assert response.plan is not None
     assert len(response.plan.tasks) >= 1
     events = runtime.list_audit(response.workflow_id)
-    assert len(events) == 6
+    types = [e["event_type"] for e in events]
+    assert types == [
+        "workflow_started",
+        "retrieval_completed",
+        "tool_invoked",
+        "context_assembled",
+        "plan_generated",
+        "groundedness_checked",
+        "approval_resolved",
+        "workflow_completed",
+    ]
+    assert response.plan.citation_coverage >= 0.5
+    assert response.plan.refusal_reason is None
+    context_event = next(e for e in events if e["event_type"] == "context_assembled")
+    assert "dropped_count" in context_event["payload"]
+    assert context_event["payload"]["labels"]
 
 
 def test_workflow_awaits_approval():
@@ -70,3 +88,36 @@ def test_rag_returns_citations_for_known_topic():
     assert response.plan is not None
     # Stub embedder should still retrieve from indexed corpus for overlapping tokens.
     assert isinstance(response.plan.citations, list)
+    assert response.plan.support
+    assert "[S1]" in response.plan.summary
+
+
+def test_insufficient_evidence_refuses_before_generation(monkeypatch):
+    from agent_runtime.models.schemas import RetrievalTrace
+    from agent_runtime.rag.retriever import RetrievalResult
+
+    def empty_retrieve(self, *args, **kwargs):
+        return RetrievalResult(citations=[], trace=RetrievalTrace(mode="hybrid"))
+
+    monkeypatch.setattr(
+        "agent_runtime.rag.retriever.HybridRetriever.retrieve", empty_retrieve
+    )
+    runtime = RuntimeService()
+    response = runtime.start_workflow(
+        WorkflowRequest(
+            requirement="Explain how idempotency keys and approval gates should work together.",
+            change_id="CHG-1002",
+            auto_approve=True,
+        )
+    )
+    assert response.status == WorkflowStatus.INSUFFICIENT_EVIDENCE
+    assert response.plan is not None
+    assert response.plan.refusal_reason == "NO_RETRIEVED_EVIDENCE"
+    events = runtime.list_audit(response.workflow_id)
+    types = [e["event_type"] for e in events]
+    assert "plan_generated" not in types
+    assert "groundedness_checked" in types
+    evidence = runtime.get_evidence(response.workflow_id)
+    assert evidence is not None
+    assert evidence.refusal_reason == "NO_RETRIEVED_EVIDENCE"
+    assert evidence.context is not None

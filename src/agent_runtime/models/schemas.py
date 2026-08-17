@@ -24,6 +24,7 @@ class WorkflowStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     REJECTED = "rejected"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
 
 
 class Citation(BaseModel):
@@ -102,6 +103,49 @@ class DeliveryTask(BaseModel):
     acceptance_criteria: List[str] = Field(default_factory=list)
 
 
+class LabeledChunk(BaseModel):
+    label: str
+    chunk_id: str
+    source: str
+    score: float
+    text: str
+    truncated: bool = False
+
+
+class ContextBundle(BaseModel):
+    """Token-budgeted, labelled context assembled for generation."""
+
+    context_text: str = ""
+    selected: List[LabeledChunk] = Field(default_factory=list)
+    label_to_chunk_id: Dict[str, str] = Field(default_factory=dict)
+    tokens_used: int = 0
+    token_budget: int = 0
+    tokenizer: str = "heuristic"
+    dropped_count: int = 0
+    dropped_chunk_ids: List[str] = Field(default_factory=list)
+    truncated_count: int = 0
+
+
+class ClaimSupport(BaseModel):
+    label: str
+    chunk_id: str
+    source: str = ""
+    quoted_snippet: str = ""
+    support_score: float = 0.0
+    claim: str = ""
+
+
+class GroundednessResult(BaseModel):
+    citation_coverage: float = 0.0
+    confidence: float = 0.0
+    labeled_claims: int = 0
+    total_claims: int = 0
+    hallucinated_labels: List[str] = Field(default_factory=list)
+    support: List[ClaimSupport] = Field(default_factory=list)
+    refused: bool = False
+    refusal_reason: Optional[str] = None
+
+
 class DeliveryPlan(BaseModel):
     summary: str
     risks: List[str] = Field(default_factory=list)
@@ -109,6 +153,11 @@ class DeliveryPlan(BaseModel):
     citations: List[Citation] = Field(default_factory=list)
     prompt_version: str = "v1"
     model: str = "stub"
+    support: List[ClaimSupport] = Field(default_factory=list)
+    confidence: float = 0.0
+    citation_coverage: float = 0.0
+    refusal_reason: Optional[str] = None
+    context_labels: Dict[str, str] = Field(default_factory=dict)
 
 
 class WorkflowRequest(BaseModel):
@@ -138,8 +187,10 @@ class WorkflowResponse(BaseModel):
 class AuditEventType(str, Enum):
     WORKFLOW_STARTED = "workflow_started"
     RETRIEVAL_COMPLETED = "retrieval_completed"
-    PLAN_GENERATED = "plan_generated"
     TOOL_INVOKED = "tool_invoked"
+    CONTEXT_ASSEMBLED = "context_assembled"
+    PLAN_GENERATED = "plan_generated"
+    GROUNDEDNESS_CHECKED = "groundedness_checked"
     APPROVAL_RESOLVED = "approval_resolved"
     WORKFLOW_COMPLETED = "workflow_completed"
 
@@ -161,6 +212,9 @@ class HealthResponse(BaseModel):
     rag_top_k: int = 4
     candidate_k: int = 20
     indexed_chunks: int = 0
+    context_token_budget: int = 800
+    relevance_floor: float = 0.12
+    coverage_floor: float = 0.5
 
 
 class RetrievalRequest(BaseModel):
@@ -177,3 +231,17 @@ class RetrievalResponse(BaseModel):
     query: str
     citations: List[Citation] = Field(default_factory=list)
     trace: RetrievalTrace
+
+
+class EvidenceResponse(BaseModel):
+    """Reconstructs why a plan was produced or refused."""
+
+    workflow_id: str
+    status: WorkflowStatus
+    retrieval_trace: Optional[RetrievalTrace] = None
+    citations: List[Citation] = Field(default_factory=list)
+    context: Optional[ContextBundle] = None
+    groundedness: Optional[GroundednessResult] = None
+    support: List[ClaimSupport] = Field(default_factory=list)
+    plan_summary: Optional[str] = None
+    refusal_reason: Optional[str] = None

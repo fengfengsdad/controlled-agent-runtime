@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     mmr_lambda: float = 0.7
     per_source_cap: int = 2
 
+    # Context assembly: token budget and grounding floors.
+    context_token_budget: int = 800
+    relevance_floor: float = 0.12
+    coverage_floor: float = 0.5
+
     # Applied to every ingested document until per-source governance metadata
     # exists; retrieval filters read these labels.
     default_classification: str = "internal"

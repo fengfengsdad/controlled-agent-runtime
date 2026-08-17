@@ -32,7 +32,10 @@ def test_workflow_uses_mcp_transport(monkeypatch):
     runtime = RuntimeService()
     response = runtime.start_workflow(
         WorkflowRequest(
-            requirement="Add idempotent retries for webhook delivery failures.",
+            requirement=(
+                "Add idempotent retries for webhook delivery failures "
+                "using idempotency keys."
+            ),
             change_id="CHG-1001",
             auto_approve=True,
         )

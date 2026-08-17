@@ -7,6 +7,7 @@ from agent_runtime.config import settings
 from agent_runtime.graph.runtime import get_runtime
 from agent_runtime.models.schemas import (
     ApprovalRequest,
+    EvidenceResponse,
     HealthResponse,
     RetrievalRequest,
     RetrievalResponse,
@@ -40,6 +41,9 @@ def create_app() -> FastAPI:
             rag_top_k=settings.rag_top_k,
             candidate_k=settings.candidate_k,
             indexed_chunks=len(get_runtime().vector_store.records),
+            context_token_budget=settings.context_token_budget,
+            relevance_floor=settings.relevance_floor,
+            coverage_floor=settings.coverage_floor,
         )
 
     @app.post(
@@ -114,6 +118,18 @@ def create_app() -> FastAPI:
         if runtime.get_workflow(workflow_id) is None:
             raise HTTPException(status_code=404, detail="workflow not found")
         return {"workflow_id": workflow_id, "events": runtime.list_audit(workflow_id)}
+
+    @app.get(
+        "/v1/workflows/{workflow_id}/evidence",
+        response_model=EvidenceResponse,
+        tags=["audit"],
+        summary="Replay why this answer was produced or refused",
+    )
+    def get_evidence(workflow_id: str) -> EvidenceResponse:
+        result = get_runtime().get_evidence(workflow_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="workflow not found")
+        return result
 
     @app.post("/v1/admin/reindex", tags=["ops"])
     def reindex():

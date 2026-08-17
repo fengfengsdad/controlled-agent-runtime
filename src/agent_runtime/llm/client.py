@@ -15,7 +15,10 @@ PLAN_SYSTEM_PROMPT = """You are a delivery planning assistant for engineering ch
 Return ONLY valid JSON with keys: summary (string), risks (string[]), tasks (object[]).
 Each task needs: title, owner_role, estimate_days, dependencies (string[]),
 acceptance_criteria (string[]).
-Use retrieved context when relevant and stay within the stated requirement.
+Use only the labelled retrieved context. After every factual claim in summary
+and risks, attach an inline citation of the form [S1] using a label that appears
+in the context. Do not invent labels. If the labelled evidence does not support
+a claim, omit the claim rather than guessing.
 Prompt version: {prompt_version}.
 """
 
@@ -27,6 +30,7 @@ class LLMClient(ABC):
         requirement: str,
         citations: list[Citation],
         tool_context: str = "",
+        context_text: str = "",
     ) -> DeliveryPlan:
         raise NotImplementedError
 
@@ -37,14 +41,28 @@ class StubLLMClient(LLMClient):
         requirement: str,
         citations: list[Citation],
         tool_context: str = "",
+        context_text: str = "",
     ) -> DeliveryPlan:
         safe_req = redact_secrets(requirement)
         title_seed = re.sub(r"\s+", " ", safe_req).strip()[:80]
-        citation_note = (
-            f"Retrieved {len(citations)} context chunk(s)."
-            if citations
-            else "No retrieval hits; planned from requirement only."
-        )
+        labels = re.findall(r"\[S\d+\]", context_text)
+        primary = labels[0] if labels else ""
+        secondary = labels[1] if len(labels) > 1 else primary
+        if primary:
+            citation_note = (
+                f"Retrieved {len(citations)} labelled context chunk(s) {primary}. "
+                f"Idempotency and approval controls must stay aligned {primary}."
+            )
+            risks = [
+                f"Ambiguous acceptance criteria may expand scope {primary}.",
+                f"Missing production telemetry for post-change verification {secondary}.",
+            ]
+        else:
+            citation_note = "No retrieval hits; planned from requirement only."
+            risks = [
+                "Ambiguous acceptance criteria may expand scope.",
+                "Missing production telemetry for post-change verification.",
+            ]
         tasks = [
             DeliveryTask(
                 title=f"Clarify scope: {title_seed}",
@@ -76,15 +94,13 @@ class StubLLMClient(LLMClient):
                 ],
             ),
         ]
-        risks = [
-            "Ambiguous acceptance criteria may expand scope",
-            "Missing production telemetry for post-change verification",
-        ]
-        if "payment" in safe_req.lower():
-            risks.append("Payment path changes require regression coverage")
+        if "payment" in safe_req.lower() and primary:
+            risks.append(f"Payment path changes require regression coverage {primary}.")
+        elif "payment" in safe_req.lower():
+            risks.append("Payment path changes require regression coverage.")
         summary = (
-            f"Stub plan for engineering change. {citation_note} "
-            f"Tool context length={len(tool_context)}."
+            f"Stub plan for the engineering change {primary or 'without retrieved evidence'}. "
+            f"{citation_note} Tool context length={len(tool_context)}."
         )
         return DeliveryPlan(
             summary=summary,
@@ -107,13 +123,12 @@ class OpenAICompatibleLLMClient(LLMClient):
         requirement: str,
         citations: list[Citation],
         tool_context: str = "",
+        context_text: str = "",
     ) -> DeliveryPlan:
-        context_blocks = "\n\n".join(
-            f"[{c.source} | score={c.score}]\n{c.text}" for c in citations
-        )
+        labelled = context_text.strip() or "(none)"
         user_prompt = (
             f"Requirement:\n{redact_secrets(requirement)}\n\n"
-            f"Retrieved context:\n{context_blocks or '(none)'}\n\n"
+            f"Retrieved context:\n{labelled}\n\n"
             f"Tool context:\n{tool_context or '(none)'}\n"
         )
         headers = {"Authorization": f"Bearer {self.api_key}"}

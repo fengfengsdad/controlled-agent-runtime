@@ -10,13 +10,23 @@ from agent_runtime.config import settings
 from agent_runtime.llm.client import LLMClient, get_llm_client
 from agent_runtime.models.schemas import (
     AuditEventType,
+    Citation,
+    ContextBundle,
     DeliveryPlan,
+    EvidenceResponse,
+    GroundednessResult,
     RetrievalFilter,
     WorkflowRequest,
     WorkflowResponse,
     WorkflowStatus,
     new_id,
     utc_now,
+)
+from agent_runtime.rag.context import build_context
+from agent_runtime.rag.groundedness import (
+    check_groundedness,
+    drop_hallucinated_labels,
+    retrieval_refusal_reason,
 )
 from agent_runtime.rag.retriever import HybridRetriever
 from agent_runtime.rag.store import VectorStore, get_embedder, ingest_corpus
@@ -34,6 +44,8 @@ class AgentState(TypedDict, total=False):
     auto_approve: bool
     citations: List[Dict[str, Any]]
     retrieval_trace: Dict[str, Any]
+    context_bundle: Dict[str, Any]
+    groundedness: Dict[str, Any]
     tool_context: str
     plan: Dict[str, Any]
     status: str
@@ -142,6 +154,38 @@ class RuntimeService:
         self._persist(state)
         return state
 
+    def _node_context(self, state: AgentState) -> AgentState:
+        citations = [Citation.model_validate(c) for c in state.get("citations", [])]
+        bundle = build_context(
+            citations,
+            budget_tokens=settings.context_token_budget,
+            per_source_cap=settings.per_source_cap,
+        )
+        state["context_bundle"] = bundle.model_dump()
+        self.audit.append(
+            state["workflow_id"],
+            AuditEventType.CONTEXT_ASSEMBLED,
+            {
+                "token_budget": bundle.token_budget,
+                "tokens_used": bundle.tokens_used,
+                "tokenizer": bundle.tokenizer,
+                "selected": len(bundle.selected),
+                "dropped_count": bundle.dropped_count,
+                "dropped_chunk_ids": bundle.dropped_chunk_ids,
+                "truncated_count": bundle.truncated_count,
+                "labels": list(bundle.label_to_chunk_id),
+            },
+        )
+        reason = retrieval_refusal_reason(citations, settings.relevance_floor)
+        if reason:
+            return self._complete_refusal(
+                state,
+                reason,
+                GroundednessResult(refused=True, refusal_reason=reason),
+            )
+        self._persist(state)
+        return state
+
     def _node_tool(self, state: AgentState) -> AgentState:
         result = self.requirement_tool.lookup(state["change_id"])
         self.audit.append(
@@ -161,16 +205,17 @@ class RuntimeService:
         return state
 
     def _node_plan(self, state: AgentState) -> AgentState:
-        from agent_runtime.models.schemas import Citation
-
         citations = [Citation.model_validate(c) for c in state.get("citations", [])]
+        bundle = ContextBundle.model_validate(state.get("context_bundle") or {})
         plan = with_backoff(
             lambda: self.llm.generate_plan(
                 requirement=state["requirement"],
                 citations=citations,
                 tool_context=state.get("tool_context", ""),
+                context_text=bundle.context_text,
             )
         )
+        plan.context_labels = bundle.label_to_chunk_id
         state["plan"] = plan.model_dump()
         self.audit.append(
             state["workflow_id"],
@@ -180,6 +225,81 @@ class RuntimeService:
                 "model": plan.model,
                 "prompt_version": plan.prompt_version,
             },
+        )
+        self._persist(state)
+        return state
+
+    def _node_groundedness(self, state: AgentState) -> AgentState:
+        citations = [Citation.model_validate(c) for c in state.get("citations", [])]
+        bundle = ContextBundle.model_validate(state.get("context_bundle") or {})
+        plan = DeliveryPlan.model_validate(state.get("plan") or {"summary": ""})
+        plan = drop_hallucinated_labels(plan, bundle.label_to_chunk_id)
+        result = check_groundedness(
+            plan, citations, bundle.label_to_chunk_id, settings.coverage_floor
+        )
+        plan.support = result.support
+        plan.citation_coverage = result.citation_coverage
+        plan.confidence = result.confidence
+        plan.refusal_reason = result.refusal_reason
+        plan.context_labels = bundle.label_to_chunk_id
+        state["plan"] = plan.model_dump()
+        if result.refused:
+            return self._complete_refusal(state, result.refusal_reason or "", result)
+        state["groundedness"] = result.model_dump()
+        self.audit.append(
+            state["workflow_id"],
+            AuditEventType.GROUNDEDNESS_CHECKED,
+            {
+                "citation_coverage": result.citation_coverage,
+                "confidence": result.confidence,
+                "labeled_claims": result.labeled_claims,
+                "total_claims": result.total_claims,
+                "hallucinated_labels": result.hallucinated_labels,
+                "refused": False,
+            },
+        )
+        self._persist(state)
+        return state
+
+    def _complete_refusal(
+        self,
+        state: AgentState,
+        reason: str,
+        groundedness: GroundednessResult,
+    ) -> AgentState:
+        citations = [Citation.model_validate(c) for c in state.get("citations", [])]
+        bundle = ContextBundle.model_validate(state.get("context_bundle") or {})
+        plan = DeliveryPlan(
+            summary="Insufficient retrieved evidence to produce a grounded plan.",
+            risks=[],
+            tasks=[],
+            citations=citations,
+            prompt_version=settings.prompt_version,
+            model="none",
+            support=groundedness.support,
+            confidence=0.0,
+            citation_coverage=groundedness.citation_coverage,
+            refusal_reason=reason,
+            context_labels=bundle.label_to_chunk_id,
+        )
+        state["plan"] = plan.model_dump()
+        state["groundedness"] = groundedness.model_dump()
+        state["status"] = WorkflowStatus.INSUFFICIENT_EVIDENCE.value
+        self.audit.append(
+            state["workflow_id"],
+            AuditEventType.GROUNDEDNESS_CHECKED,
+            {
+                "citation_coverage": groundedness.citation_coverage,
+                "confidence": groundedness.confidence,
+                "hallucinated_labels": groundedness.hallucinated_labels,
+                "refused": True,
+                "refusal_reason": reason,
+            },
+        )
+        self.audit.append(
+            state["workflow_id"],
+            AuditEventType.WORKFLOW_COMPLETED,
+            {"status": state["status"], "refusal_reason": reason},
         )
         self._persist(state)
         return state
@@ -203,6 +323,16 @@ class RuntimeService:
         self._persist(state)
         return state
 
+    def _route_after_context(self, state: AgentState) -> str:
+        if state.get("status") == WorkflowStatus.INSUFFICIENT_EVIDENCE.value:
+            return "refuse"
+        return "plan"
+
+    def _route_after_groundedness(self, state: AgentState) -> str:
+        if state.get("status") == WorkflowStatus.INSUFFICIENT_EVIDENCE.value:
+            return "done"
+        return "approval"
+
     def _route_after_approval(self, state: AgentState) -> str:
         if state.get("status") == WorkflowStatus.AWAITING_APPROVAL.value:
             return "wait"
@@ -213,13 +343,25 @@ class RuntimeService:
         graph.add_node("start", self._node_start)
         graph.add_node("retrieve", self._node_retrieve)
         graph.add_node("tool", self._node_tool)
+        graph.add_node("context", self._node_context)
         graph.add_node("plan", self._node_plan)
+        graph.add_node("groundedness", self._node_groundedness)
         graph.add_node("approval_gate", self._node_approval_gate)
         graph.set_entry_point("start")
         graph.add_edge("start", "retrieve")
         graph.add_edge("retrieve", "tool")
-        graph.add_edge("tool", "plan")
-        graph.add_edge("plan", "approval_gate")
+        graph.add_edge("tool", "context")
+        graph.add_conditional_edges(
+            "context",
+            self._route_after_context,
+            {"refuse": END, "plan": "plan"},
+        )
+        graph.add_edge("plan", "groundedness")
+        graph.add_conditional_edges(
+            "groundedness",
+            self._route_after_groundedness,
+            {"done": END, "approval": "approval_gate"},
+        )
         graph.add_conditional_edges(
             "approval_gate",
             self._route_after_approval,
@@ -243,6 +385,8 @@ class RuntimeService:
             "auto_approve": request.auto_approve,
             "citations": [],
             "retrieval_trace": {},
+            "context_bundle": {},
+            "groundedness": {},
             "tool_context": "",
             "plan": {},
             "status": WorkflowStatus.PENDING.value,
@@ -299,6 +443,38 @@ class RuntimeService:
 
     def list_audit(self, workflow_id: str) -> List[Dict[str, Any]]:
         return [e.model_dump(mode="json") for e in self.audit.list_for_workflow(workflow_id)]
+
+    def get_evidence(self, workflow_id: str) -> Optional[EvidenceResponse]:
+        row = self.checkpoints.get(workflow_id)
+        if row is None:
+            return None
+        state = row["state"]
+        plan = None
+        if state.get("plan"):
+            plan = DeliveryPlan.model_validate(state["plan"])
+        trace = None
+        if state.get("retrieval_trace"):
+            from agent_runtime.models.schemas import RetrievalTrace
+
+            trace = RetrievalTrace.model_validate(state["retrieval_trace"])
+        context = None
+        if state.get("context_bundle"):
+            context = ContextBundle.model_validate(state["context_bundle"])
+        groundedness = None
+        if state.get("groundedness"):
+            groundedness = GroundednessResult.model_validate(state["groundedness"])
+        citations = [Citation.model_validate(c) for c in state.get("citations", [])]
+        return EvidenceResponse(
+            workflow_id=state["workflow_id"],
+            status=WorkflowStatus(state["status"]),
+            retrieval_trace=trace,
+            citations=citations,
+            context=context,
+            groundedness=groundedness,
+            support=plan.support if plan else [],
+            plan_summary=plan.summary if plan else None,
+            refusal_reason=plan.refusal_reason if plan else None,
+        )
 
     def _to_response(self, state: Dict[str, Any]) -> WorkflowResponse:
         plan = None

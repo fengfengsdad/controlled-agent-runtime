@@ -82,6 +82,14 @@ curl -s http://127.0.0.1:8080/v1/retrieval/search \
 每条 citation 同时带 `vector_rank` / `bm25_rank` / `fusion_rank` / `rerank_rank` 和各阶段分数——
 `score` 是最终排序值，但 `fusion_score` 始终保留重排前的判断，所以重排的效果是可度量的。
 
+### Context 预算与接地生成
+
+生成前会按 token 预算把选中的 chunk 打上 `[S1]`…`[Sn]` 标签；装不下的 chunk 会计入 `dropped_count` 并写入审计，最后一条按句边界截断而不是硬切。生成后会校验这些标签：幻觉引用会被剔除，`citation_coverage` 或检索分数低于阈值时返回 `insufficient_evidence`，而不是给出没有证据的答案。
+
+```bash
+curl -s http://127.0.0.1:8080/v1/workflows/{id}/evidence | python -m json.tool
+```
+
 ### 本地 cross-encoder 重排（可选）
 
 ```bash
